@@ -5,22 +5,22 @@ import (
 	"go.uber.org/atomic"
 )
 
-type sourceFn func() []interface{}
+type generatorFn func() <-chan interface{}
 
 // Queue continues queue
 type Queue struct {
 	buckets      []goconcurrentqueue.Queue
 	totalBuckets int32
 	pt           *atomic.Int32
-	source       sourceFn
+	generator    generatorFn
 }
 
 // NewQueue returns a Queue pointer
-func NewQueue(buckets int, cap int, source sourceFn) *Queue {
+func NewQueue(buckets int, cap int, generator generatorFn) *Queue {
 	queue := &Queue{
 		pt:           atomic.NewInt32(0),
 		buckets:      make([]goconcurrentqueue.Queue, buckets),
-		source:       source,
+		generator:    generator,
 		totalBuckets: int32(buckets),
 	}
 	for i := 0; i < buckets; i++ {
@@ -61,8 +61,7 @@ func (q *Queue) Dequeue() interface{} {
 }
 
 func (q *Queue) fill(pt int) {
-	items := q.source()
-	for _, v := range items {
+	for v := range q.generator() {
 		q.buckets[pt].Enqueue(v)
 	}
 }
