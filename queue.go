@@ -12,6 +12,7 @@ type Queue struct {
 	buckets      []goconcurrentqueue.Queue
 	totalBuckets int32
 	pt           *atomic.Int32
+	cap          int
 	generator    generatorFn
 }
 
@@ -20,8 +21,9 @@ func NewQueue(buckets int, cap int, generator generatorFn) *Queue {
 	queue := &Queue{
 		pt:           atomic.NewInt32(0),
 		buckets:      make([]goconcurrentqueue.Queue, buckets),
-		generator:    generator,
 		totalBuckets: int32(buckets),
+		cap:          cap,
+		generator:    generator,
 	}
 	for i := 0; i < buckets; i++ {
 		bucket := goconcurrentqueue.NewFixedFIFO(cap)
@@ -30,9 +32,25 @@ func NewQueue(buckets int, cap int, generator generatorFn) *Queue {
 	return queue
 }
 
-func (q *Queue) Initiate() {
-	for idx := range q.buckets {
-		q.fill(idx)
+func (q *Queue) Initiate(vals []interface{}, fill bool) {
+	var (
+		idx int
+		l   = len(vals)
+	)
+	for bucketID, bucket := range q.buckets {
+		var bucketFull bool
+		for idx < l {
+			if err := bucket.Enqueue(vals[idx]); err != nil {
+				bucketFull = true
+				break
+			}
+			idx++
+		}
+		if bucketFull {
+			continue
+		} else if idx-bucketID*q.cap < q.cap && fill {
+			q.fill(bucketID)
+		}
 	}
 }
 
