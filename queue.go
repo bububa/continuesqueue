@@ -5,7 +5,7 @@ import (
 	"go.uber.org/atomic"
 )
 
-type generatorFn func() <-chan interface{}
+type generatorFn func(n int) <-chan interface{}
 
 // Queue continues queue
 type Queue struct {
@@ -79,8 +79,10 @@ func (q *Queue) Dequeue() interface{} {
 }
 
 func (q *Queue) fill(pt int) {
-	for v := range q.generator() {
-		q.buckets[pt].Enqueue(v)
+	bucket := q.buckets[pt]
+	n := bucket.GetCap() - bucket.GetLen()
+	for v := range q.generator(n) {
+		bucket.Enqueue(v)
 	}
 }
 
