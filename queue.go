@@ -1,8 +1,6 @@
 package continuesqueue
 
 import (
-	"sync"
-
 	"github.com/enriquebris/goconcurrentqueue"
 	"go.uber.org/atomic"
 )
@@ -57,18 +55,30 @@ func (q *Queue) Initiate(vals []interface{}, fill bool) {
 }
 
 func (q *Queue) EnqueueEqually(n int) {
-	var wg sync.WaitGroup
-	for _, bucket := range q.buckets {
-		bk := bucket
-		wg.Add(1)
-		go func() {
-			for v := range q.generator(n) {
-				bk.Enqueue(v)
+	total := int(q.totalBuckets)
+	skips := make(map[int]struct{}, total)
+	for i := 0; i < q.cap; i++ {
+		var idx int
+		n := total - len(skips)
+		if n <= 0 {
+			return
+		}
+		for v := range q.generator(n) {
+			for {
+				if _, found := skips[idx]; found {
+					idx++
+				} else {
+					break
+				}
 			}
-			wg.Done()
-		}()
+			if idx >= total {
+				continue
+			}
+			if err := q.buckets[idx].Enqueue(v); err != nil {
+				skips[idx] = struct{}{}
+			}
+		}
 	}
-	wg.Wait()
 }
 
 func (q *Queue) swap() {
