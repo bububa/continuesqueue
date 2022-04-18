@@ -1,6 +1,8 @@
 package continuesqueue
 
 import (
+	"errors"
+
 	"github.com/enriquebris/goconcurrentqueue"
 	"go.uber.org/atomic"
 )
@@ -103,6 +105,26 @@ func (q *Queue) Dequeue() interface{} {
 		return q.Dequeue()
 	}
 	return bs
+}
+
+// DequeueRetry dequeue element
+// retry if pool locked
+func (q *Queue) DequeueRetry(retries int) (interface{}, error) {
+	if retries <= 0 {
+		return nil, errors.New("exceed max retries")
+	}
+	pt := q.pt.Load()
+	if pt >= q.totalBuckets {
+		q.swap()
+		return q.DequeueRetry(retries)
+	}
+	bs, err := q.buckets[pt].Dequeue()
+	if err != nil {
+		q.swap()
+		go q.fill(int(pt))
+		return q.DequeueRetry(retries - 1)
+	}
+	return bs, nil
 }
 
 func (q *Queue) fill(pt int) {
