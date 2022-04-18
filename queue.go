@@ -14,6 +14,7 @@ type Queue struct {
 	buckets      []goconcurrentqueue.Queue
 	totalBuckets int32
 	pt           *atomic.Int32
+	enqueueLock  *atomic.Bool
 	cap          int
 	generator    generatorFn
 }
@@ -25,6 +26,7 @@ func NewQueue(buckets int, cap int, generator generatorFn) *Queue {
 		buckets:      make([]goconcurrentqueue.Queue, buckets),
 		totalBuckets: int32(buckets),
 		cap:          cap,
+		enqueueLock:  atomic.NewBool(false),
 		generator:    generator,
 	}
 	for i := 0; i < buckets; i++ {
@@ -34,29 +36,11 @@ func NewQueue(buckets int, cap int, generator generatorFn) *Queue {
 	return queue
 }
 
-func (q *Queue) Initiate(vals []interface{}, fill bool) {
-	var (
-		idx int
-		l   = len(vals)
-	)
-	for bucketID, bucket := range q.buckets {
-		var bucketFull bool
-		for idx < l {
-			if err := bucket.Enqueue(vals[idx]); err != nil {
-				bucketFull = true
-				break
-			}
-			idx++
-		}
-		if bucketFull {
-			continue
-		} else if idx-bucketID*q.cap < q.cap && fill {
-			q.fill(bucketID)
-		}
+func (q *Queue) EnqueueEqually() {
+	if !q.enqueueLock.CAS(false, true) {
+		return
 	}
-}
-
-func (q *Queue) EnqueueEqually(n int) {
+	defer q.enqueueLock.Store(false)
 	total := int(q.totalBuckets)
 	skips := make(map[int]struct{}, total)
 	for i := 0; i < q.cap; i++ {
@@ -100,8 +84,8 @@ func (q *Queue) Dequeue() interface{} {
 	}
 	bs, err := q.buckets[pt].Dequeue()
 	if err != nil {
+		go q.EnqueueEqually()
 		q.swap()
-		go q.fill(int(pt))
 		return q.Dequeue()
 	}
 	return bs
@@ -120,19 +104,11 @@ func (q *Queue) DequeueRetry(retries int) (interface{}, error) {
 	}
 	bs, err := q.buckets[pt].Dequeue()
 	if err != nil {
+		go q.EnqueueEqually()
 		q.swap()
-		go q.fill(int(pt))
 		return q.DequeueRetry(retries - 1)
 	}
 	return bs, nil
-}
-
-func (q *Queue) fill(pt int) {
-	bucket := q.buckets[pt]
-	n := bucket.GetCap() - bucket.GetLen()
-	for v := range q.generator(n) {
-		bucket.Enqueue(v)
-	}
 }
 
 func (q *Queue) Iter() <-chan interface{} {
