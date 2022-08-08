@@ -36,6 +36,18 @@ func NewQueue(buckets int, cap int, generator generatorFn) *Queue {
 	return queue
 }
 
+func (q *Queue) Fill(list []interface{}) {
+	if !q.enqueueLock.CAS(false, true) {
+		return
+	}
+	defer q.enqueueLock.Store(false)
+	for _, v := range list {
+		for _, bucket := range q.buckets {
+			bucket.Enqueue(v)
+		}
+	}
+}
+
 func (q *Queue) EnqueueEqually() {
 	if !q.enqueueLock.CAS(false, true) {
 		return
