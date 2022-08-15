@@ -1,6 +1,9 @@
 package continuesqueue
 
 import (
+	"errors"
+	"time"
+
 	"github.com/enriquebris/goconcurrentqueue"
 	"go.uber.org/atomic"
 )
@@ -9,13 +12,14 @@ type generatorFn func(n int) <-chan interface{}
 
 // Queue continues queue
 type Queue struct {
-	buckets      []goconcurrentqueue.Queue
-	totalBuckets int32
-	pt           *atomic.Int32
-	enqueueLock  *atomic.Bool
-	cap          int
-	generator    generatorFn
-	enqueueCh    chan struct{}
+	cap           int
+	fillThreshold int
+	totalBuckets  int32
+	pt            *atomic.Int32
+	enqueueLock   *atomic.Bool
+	generator     generatorFn
+	enqueueCh     chan struct{}
+	buckets       []goconcurrentqueue.Queue
 }
 
 // NewQueue returns a Queue pointer
@@ -50,6 +54,15 @@ func (q *Queue) Close() {
 	close(q.enqueueCh)
 }
 
+func (q *Queue) SetFillThreshold(n int) {
+	if n >= q.cap {
+		n = q.cap - 1
+	} else if n < 0 {
+		n = 0
+	}
+	q.fillThreshold = n
+}
+
 func (q *Queue) Fill(list []interface{}) {
 	if !q.enqueueLock.CAS(false, true) {
 		return
@@ -66,7 +79,7 @@ func (q *Queue) EnqueueEqually() {
 	total := int(q.totalBuckets)
 	skips := make(map[int]struct{}, total)
 	for idx, b := range q.buckets {
-		if b.GetLen() > 0 {
+		if b.GetLen() > q.fillThreshold {
 			skips[idx] = struct{}{}
 		}
 	}
@@ -108,19 +121,34 @@ func (q *Queue) swap() {
 // Dequeue dequeue element
 // retry if pool locked
 func (q *Queue) Dequeue() interface{} {
+	var ts time.Time
+	ret, _ := q.timeoutDequeue(ts, 0)
+	return ret
+}
+
+// DequeueWithTimeout .
+func (q *Queue) DequeueWithTimeout(timeout time.Duration) (interface{}, error) {
+	return q.timeoutDequeue(time.Now(), timeout)
+}
+
+func (q *Queue) timeoutDequeue(startTime time.Time, timeout time.Duration) (interface{}, error) {
+	if timeout > 0 && time.Since(startTime) > timeout {
+		return nil, errors.New("timeout")
+	}
 	q.swap()
 	pt := q.pt.Load()
 	if pt >= q.totalBuckets {
-		return q.Dequeue()
+		return q.timeoutDequeue(startTime, timeout)
 	}
 	bs, err := q.buckets[pt].Dequeue()
 	if err != nil {
 		q.enqueueCh <- struct{}{}
-		return q.Dequeue()
+		return q.timeoutDequeue(startTime, timeout)
 	}
-	return bs
+	return bs, nil
 }
 
+// Iter iterate elements in the queue
 func (q *Queue) Iter() <-chan interface{} {
 	ch := make(chan interface{})
 	go func() {
