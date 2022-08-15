@@ -18,7 +18,6 @@ type Queue struct {
 	pt            *atomic.Int32
 	enqueueLock   *atomic.Bool
 	generator     generatorFn
-	enqueueCh     chan struct{}
 	buckets       []goconcurrentqueue.Queue
 }
 
@@ -31,27 +30,12 @@ func NewQueue(buckets int, cap int, generator generatorFn) *Queue {
 		cap:          cap,
 		enqueueLock:  atomic.NewBool(false),
 		generator:    generator,
-		enqueueCh:    make(chan struct{}),
 	}
 	for i := 0; i < buckets; i++ {
 		bucket := goconcurrentqueue.NewFixedFIFO(cap)
 		queue.buckets[i] = bucket
 	}
-	go queue.start()
 	return queue
-}
-
-func (q *Queue) start() {
-	for range q.enqueueCh {
-		if q.enqueueLock.CAS(false, true) {
-			q.EnqueueEqually()
-			q.enqueueLock.Store(false)
-		}
-	}
-}
-
-func (q *Queue) Close() {
-	close(q.enqueueCh)
 }
 
 func (q *Queue) SetFillThreshold(n int) {
@@ -76,16 +60,17 @@ func (q *Queue) Fill(list []interface{}) {
 }
 
 func (q *Queue) EnqueueEqually() {
+	defer q.enqueueLock.Store(false)
 	total := int(q.totalBuckets)
 	skips := make(map[int]struct{}, total)
-	for idx, b := range q.buckets {
-		if b.GetLen() > q.fillThreshold {
-			skips[idx] = struct{}{}
-		}
-	}
-	if total-len(skips) <= 0 {
-		return
-	}
+	// for idx, b := range q.buckets {
+	// 	if b.GetLen() > q.fillThreshold {
+	// 		skips[idx] = struct{}{}
+	// 	}
+	// }
+	// if total-len(skips) <= 0 {
+	// 	return
+	// }
 	for i := 0; i < q.cap; i++ {
 		var idx int
 		n := total - len(skips)
@@ -135,14 +120,16 @@ func (q *Queue) timeoutDequeue(startTime time.Time, timeout time.Duration) (inte
 	if timeout > 0 && time.Since(startTime) > timeout {
 		return nil, errors.New("timeout")
 	}
-	q.swap()
 	pt := q.pt.Load()
 	if pt >= q.totalBuckets {
 		return q.timeoutDequeue(startTime, timeout)
 	}
 	bs, err := q.buckets[pt].Dequeue()
 	if err != nil {
-		q.enqueueCh <- struct{}{}
+		if q.enqueueLock.CAS(false, true) {
+			go q.EnqueueEqually()
+		}
+		q.swap()
 		return q.timeoutDequeue(startTime, timeout)
 	}
 	return bs, nil
